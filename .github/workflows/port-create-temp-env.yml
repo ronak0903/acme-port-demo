@@ -1,0 +1,144 @@
+name: Port - Create Temporary Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service entity identifier"
+        required: true
+        type: string
+      base_environment:
+        description: "Base environment identifier (development or staging)"
+        required: false
+        type: string
+      ttl_hours:
+        description: "Hours until this environment expires (1-24)"
+        required: true
+        type: string
+      triggered_by:
+        description: "Email of the requesting user"
+        required: false
+        type: string
+      port_run_id:
+        description: "Port action run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  create-preview-env:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        run: |
+          TTL="${{ inputs.ttl_hours }}"
+          if [[ "$TTL" -lt 1 || "$TTL" -gt 24 ]]; then
+            echo "❌ ERROR: ttl_hours must be between 1 and 24"
+            exit 1
+          fi
+          echo "✅ TTL: ${TTL}h — Service: ${{ inputs.service }}"
+
+      - name: Calculate expiration datetime
+        id: calc_ttl
+        run: |
+          TTL_SECONDS=$(( ${{ inputs.ttl_hours }} * 3600 ))
+          EXPIRY=$(date -u -d "+${TTL_SECONDS} seconds" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || \
+                   date -u -v "+${TTL_SECONDS}S" '+%Y-%m-%dT%H:%M:%SZ')
+          UNIQUE_ID=$(date +%s | tail -c 6)
+          ENV_ID="${{ inputs.service }}-preview-${UNIQUE_ID}"
+          echo "expiry=$EXPIRY" >> "$GITHUB_OUTPUT"
+          echo "env_id=$ENV_ID" >> "$GITHUB_OUTPUT"
+          echo "Expiry: $EXPIRY"
+          echo "Environment ID: $ENV_ID"
+
+      - name: Report environment creation started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "🌐 Creating preview environment '${{ steps.calc_ttl.outputs.env_id }}' for ${{ inputs.service }} (TTL: ${{ inputs.ttl_hours }}h, expires: ${{ steps.calc_ttl.outputs.expiry }})..."
+
+      - name: Simulate — Provision preview environment
+        run: |
+          echo "[SIMULATE] Provisioning preview environment..."
+          echo "  ▸ Environment ID:   ${{ steps.calc_ttl.outputs.env_id }}"
+          echo "  ▸ Service:          ${{ inputs.service }}"
+          echo "  ▸ Base environment: ${{ inputs.base_environment }}"
+          echo "  ▸ TTL:              ${{ inputs.ttl_hours }} hours"
+          echo "  ▸ Expires at:       ${{ steps.calc_ttl.outputs.expiry }}"
+          sleep 2
+          echo "  ▸ Allocating namespace..."
+          sleep 1
+          echo "  ▸ Copying base configuration..."
+          sleep 1
+          echo "  ▸ Deploying service image..."
+          sleep 2
+          echo "  ▸ Running health check..."
+          sleep 1
+          echo "✅ Preview environment ready!"
+
+      - name: Create Environment entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ steps.calc_ttl.outputs.env_id }}
+          title: "${{ inputs.service }} preview (TTL: ${{ inputs.ttl_hours }}h)"
+          blueprint: environment
+          properties: |
+            {
+              "type": "preview",
+              "status": "active",
+              "ttl": "${{ steps.calc_ttl.outputs.expiry }}"
+            }
+
+      - name: Associate preview environment with service
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service }}
+          blueprint: service
+          properties: "{}"
+          relations: |
+            {
+              "environments": ["${{ steps.calc_ttl.outputs.env_id }}"]
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Preview environment created!
+            ID:         ${{ steps.calc_ttl.outputs.env_id }}
+            Service:    ${{ inputs.service }}
+            Type:       preview
+            Status:     active
+            Expires at: ${{ steps.calc_ttl.outputs.expiry }}
+            Requested by: ${{ inputs.triggered_by }}
+            The environment will be automatically marked as 'expired' when the TTL elapses.
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: "❌ Preview environment creation FAILED for ${{ inputs.service }}. Check workflow logs."
