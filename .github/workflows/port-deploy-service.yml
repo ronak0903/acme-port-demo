@@ -1,0 +1,153 @@
+name: Port - Deploy Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_identifier:
+        description: "Port service entity identifier"
+        required: true
+        type: string
+      service_name:
+        description: "Service display name"
+        required: true
+        type: string
+      environment:
+        description: "Target environment identifier"
+        required: true
+        type: string
+      version:
+        description: "Version to deploy (e.g. 1.2.3 or sha-abc1234)"
+        required: true
+        type: string
+      triggered_by:
+        description: "Email of the user who triggered this deployment"
+        required: false
+        type: string
+      port_run_id:
+        description: "Port action run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          echo "============================================"
+          echo "  ACME DEVELOPER PLATFORM — Deploy Service"
+          echo "============================================"
+          echo "Service:     ${{ inputs.service_identifier }}"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Version:     ${{ inputs.version }}"
+          echo "Triggered by: ${{ inputs.triggered_by }}"
+          echo "Port Run ID: ${{ inputs.port_run_id }}"
+          echo "============================================"
+          if [[ -z "${{ inputs.service_identifier }}" || -z "${{ inputs.version }}" || -z "${{ inputs.environment }}" ]]; then
+            echo "❌ ERROR: service_identifier, version, and environment are required."
+            exit 1
+          fi
+
+      - name: Report deployment started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "🚀 Starting deployment of ${{ inputs.service_name }} v${{ inputs.version }} to ${{ inputs.environment }}..."
+
+      - name: Simulate — Pull Docker image
+        run: |
+          echo "[SIMULATE] docker pull acme/${{ inputs.service_identifier }}:${{ inputs.version }}"
+          echo "✅ Image pulled: acme/${{ inputs.service_identifier }}:${{ inputs.version }}"
+          sleep 2
+
+      - name: Report build progress
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "📦 Image verified. Starting deployment to ${{ inputs.environment }}..."
+
+      - name: Simulate — Deploy to environment
+        run: |
+          echo "[SIMULATE] Deploying to ${{ inputs.environment }}..."
+          echo "  ▸ Stopping old containers..."
+          sleep 1
+          echo "  ▸ Starting new containers with version ${{ inputs.version }}..."
+          sleep 2
+          echo "  ▸ Waiting for containers to become ready..."
+          sleep 2
+          echo "✅ Containers started successfully"
+
+      - name: Simulate — Health check
+        run: |
+          echo "[SIMULATE] Running health checks..."
+          for i in 1 2 3; do
+            echo "  Health check attempt $i/3..."
+            sleep 1
+          done
+          echo "✅ All health checks passed"
+
+      - name: Create deployment entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: "${{ inputs.service_identifier }}-${{ inputs.version }}-${{ inputs.environment }}"
+          title: "${{ inputs.service_name }} v${{ inputs.version }}"
+          blueprint: deployment
+          properties: |
+            {
+              "version": "${{ inputs.version }}",
+              "image_tag": "${{ inputs.version }}",
+              "triggered_by": "${{ inputs.triggered_by }}",
+              "deploymentStatus": "Success",
+              "environment": "${{ inputs.environment }}",
+              "createdAt": "${{ github.event.head_commit.timestamp }}"
+            }
+          relations: |
+            {
+              "service": "${{ inputs.service_identifier }}",
+              "environment_relation": "${{ inputs.environment }}"
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Deployment complete!
+            Service:     ${{ inputs.service_name }}
+            Version:     ${{ inputs.version }}
+            Environment: ${{ inputs.environment }}
+            Deployed by: ${{ inputs.triggered_by }}
+            Deployment entity created in Port catalog.
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: "❌ Deployment FAILED for ${{ inputs.service_name }} v${{ inputs.version }} to ${{ inputs.environment }}. Check workflow logs."
