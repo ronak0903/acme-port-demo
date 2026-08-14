@@ -1,0 +1,127 @@
+name: Port - Restart Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_identifier:
+        description: "Port service entity identifier"
+        required: true
+        type: string
+      service_name:
+        description: "Service display name"
+        required: true
+        type: string
+      environment:
+        description: "Target environment identifier"
+        required: true
+        type: string
+      confirmation:
+        description: "User confirmed the restart (true/false)"
+        required: true
+        type: string
+      triggered_by:
+        description: "Email of the user who triggered this restart"
+        required: false
+        type: string
+      port_run_id:
+        description: "Port action run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  restart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation
+        run: |
+          echo "============================================"
+          echo "  ACME DEVELOPER PLATFORM — Restart Service"
+          echo "============================================"
+          echo "Service:     ${{ inputs.service_identifier }}"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Confirmed:   ${{ inputs.confirmation }}"
+          echo "Triggered by: ${{ inputs.triggered_by }}"
+          echo "============================================"
+          if [[ "${{ inputs.confirmation }}" != "true" ]]; then
+            echo "❌ ERROR: Restart was not confirmed. Set confirmation=true to proceed."
+            exit 1
+          fi
+          echo "✅ Confirmation received. Proceeding with restart."
+
+      - name: Report restart started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "🔄 Starting restart of ${{ inputs.service_name }} in ${{ inputs.environment }}..."
+
+      - name: Simulate — Stop service
+        run: |
+          echo "[SIMULATE] Stopping service ${{ inputs.service_identifier }} in ${{ inputs.environment }}..."
+          sleep 2
+          echo "  ▸ Draining existing connections..."
+          sleep 1
+          echo "  ▸ Sending SIGTERM to running containers..."
+          sleep 1
+          echo "✅ Service stopped"
+
+      - name: Report progress — stopped
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "🛑 Service stopped. Starting new containers..."
+
+      - name: Simulate — Start service
+        run: |
+          echo "[SIMULATE] Starting service ${{ inputs.service_identifier }} in ${{ inputs.environment }}..."
+          sleep 2
+          echo "  ▸ Pulling latest image..."
+          sleep 1
+          echo "  ▸ Starting containers..."
+          sleep 2
+          echo "✅ Service started"
+
+      - name: Simulate — Health check
+        run: |
+          echo "[SIMULATE] Running health checks..."
+          for i in 1 2 3; do
+            echo "  Health check $i/3: GET /health → 200 OK"
+            sleep 1
+          done
+          echo "✅ Service is healthy"
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Restart complete!
+            Service:     ${{ inputs.service_name }}
+            Environment: ${{ inputs.environment }}
+            Restarted by: ${{ inputs.triggered_by }}
+            Service is healthy and accepting traffic.
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: "❌ Restart FAILED for ${{ inputs.service_name }} in ${{ inputs.environment }}. Check workflow logs immediately."
