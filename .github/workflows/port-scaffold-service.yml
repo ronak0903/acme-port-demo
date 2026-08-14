@@ -1,0 +1,343 @@
+name: Port - Scaffold New Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: "Service name (lowercase, hyphens)"
+        required: true
+        type: string
+      description:
+        description: "Service description"
+        required: false
+        type: string
+      team:
+        description: "Owning team identifier"
+        required: true
+        type: string
+      language:
+        description: "Programming language (Node.js, Python, Java)"
+        required: true
+        type: string
+      environment:
+        description: "Initial environment identifier"
+        required: false
+        type: string
+      port_run_id:
+        description: "Port action run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate service name
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          echo "=== Validating service name: $SERVICE ==="
+          if [[ ! "$SERVICE" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$ ]]; then
+            echo "❌ ERROR: Service name must be lowercase with hyphens only (e.g. order-service)"
+            exit 1
+          fi
+          echo "✅ Service name is valid: $SERVICE"
+
+      - name: Report scaffolding started to Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "🔨 Scaffolding service '${{ inputs.service_name }}' (language: ${{ inputs.language }})..."
+
+      - name: Create service directory structure
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          LANG="${{ inputs.language }}"
+          mkdir -p "services/$SERVICE/src"
+          echo "=== Creating project structure for $SERVICE ($LANG) ==="
+
+      - name: Scaffold Node.js project
+        if: inputs.language == 'Node.js'
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          DIR="services/$SERVICE"
+          echo "📦 Scaffolding Node.js service..."
+
+          cat > "$DIR/package.json" <<EOF
+          {
+            "name": "$SERVICE",
+            "version": "1.0.0",
+            "description": "${{ inputs.description }}",
+            "main": "src/index.js",
+            "scripts": {
+              "start": "node src/index.js",
+              "test": "jest",
+              "lint": "eslint src/"
+            },
+            "engines": { "node": ">=18" }
+          }
+          EOF
+
+          cat > "$DIR/src/index.js" <<'EOF'
+          const http = require('http');
+          const PORT = process.env.PORT || 3000;
+          const server = http.createServer((req, res) => {
+            if (req.url === '/health') {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ status: 'healthy', timestamp: new Date().toISOString() }));
+            } else {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ service: process.env.SERVICE_NAME || 'service', version: '1.0.0' }));
+            }
+          });
+          server.listen(PORT, () => console.log(`Service running on port ${PORT}`));
+          EOF
+          echo "✅ Node.js project created"
+
+      - name: Scaffold Python project
+        if: inputs.language == 'Python'
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          DIR="services/$SERVICE"
+          echo "🐍 Scaffolding Python service..."
+
+          cat > "$DIR/requirements.txt" <<EOF
+          fastapi>=0.100.0
+          uvicorn[standard]>=0.22.0
+          EOF
+
+          cat > "$DIR/src/main.py" <<'EOF'
+          from fastapi import FastAPI
+          from datetime import datetime
+          import os
+
+          app = FastAPI()
+
+          @app.get("/health")
+          def health():
+              return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+          @app.get("/")
+          def root():
+              return {"service": os.getenv("SERVICE_NAME", "service"), "version": "1.0.0"}
+
+          if __name__ == "__main__":
+              import uvicorn
+              uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 3000)))
+          EOF
+          echo "✅ Python project created"
+
+      - name: Scaffold Java project
+        if: inputs.language == 'Java'
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          DIR="services/$SERVICE"
+          echo "☕ Scaffolding Java service..."
+          mkdir -p "$DIR/src/main/java/com/acme"
+
+          cat > "$DIR/pom.xml" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <parent>
+              <groupId>org.springframework.boot</groupId>
+              <artifactId>spring-boot-starter-parent</artifactId>
+              <version>3.1.0</version>
+            </parent>
+            <groupId>com.acme</groupId>
+            <artifactId>service</artifactId>
+            <version>1.0.0</version>
+            <dependencies>
+              <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+              <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
+            </dependencies>
+          </project>
+          EOF
+
+          cat > "$DIR/src/main/java/com/acme/Application.java" <<'EOF'
+          package com.acme;
+          import org.springframework.boot.SpringApplication;
+          import org.springframework.boot.autoconfigure.SpringBootApplication;
+          @SpringBootApplication
+          public class Application {
+              public static void main(String[] args) { SpringApplication.run(Application.class, args); }
+          }
+          EOF
+          echo "✅ Java project created"
+
+      - name: Create Dockerfile
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          LANG="${{ inputs.language }}"
+          DIR="services/$SERVICE"
+
+          if [[ "$LANG" == "Node.js" ]]; then
+            cat > "$DIR/Dockerfile" <<'EOF'
+          FROM node:20-alpine
+          WORKDIR /app
+          COPY package*.json ./
+          RUN npm ci --only=production
+          COPY src/ ./src/
+          ENV PORT=3000
+          EXPOSE 3000
+          HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://localhost:3000/health || exit 1
+          CMD ["node", "src/index.js"]
+          EOF
+          elif [[ "$LANG" == "Python" ]]; then
+            cat > "$DIR/Dockerfile" <<'EOF'
+          FROM python:3.12-slim
+          WORKDIR /app
+          COPY requirements.txt .
+          RUN pip install --no-cache-dir -r requirements.txt
+          COPY src/ ./src/
+          ENV PORT=3000
+          EXPOSE 3000
+          HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:3000/health || exit 1
+          CMD ["python", "src/main.py"]
+          EOF
+          elif [[ "$LANG" == "Java" ]]; then
+            cat > "$DIR/Dockerfile" <<'EOF'
+          FROM eclipse-temurin:21-jre-alpine
+          WORKDIR /app
+          COPY target/*.jar app.jar
+          ENV PORT=3000
+          EXPOSE 3000
+          HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:3000/actuator/health || exit 1
+          CMD ["java", "-jar", "app.jar"]
+          EOF
+          fi
+          echo "✅ Dockerfile created"
+
+      - name: Create README
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          cat > "services/$SERVICE/README.md" <<EOF
+          # $SERVICE
+          ${{ inputs.description }}
+
+          **Language:** ${{ inputs.language }}
+          **Owner:** ${{ inputs.team }}
+          **Created by:** Acme Developer Platform
+
+          ## Quick Start
+          \`\`\`bash
+          docker build -t $SERVICE .
+          docker run -p 3000:3000 $SERVICE
+          \`\`\`
+
+          ## Endpoints
+          - \`GET /\` — Service info
+          - \`GET /health\` — Health check
+          EOF
+
+      - name: Create GitHub Actions CI workflow for new service
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          mkdir -p "services/$SERVICE/.github/workflows"
+          cat > "services/$SERVICE/.github/workflows/ci.yml" <<EOF
+          name: CI - $SERVICE
+
+          on:
+            push:
+              paths:
+                - 'services/$SERVICE/**'
+            pull_request:
+              paths:
+                - 'services/$SERVICE/**'
+
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - name: Build Docker image
+                  run: |
+                    cd services/$SERVICE
+                    docker build -t $SERVICE:ci .
+                - name: Health check
+                  run: |
+                    docker run -d --name test -p 3000:3000 $SERVICE:ci
+                    sleep 5
+                    curl -f http://localhost:3000/health || exit 1
+                    docker stop test
+          EOF
+
+      - name: Check for GitHub token to create repository
+        id: check_token
+        run: |
+          if [[ -z "${{ secrets.GITHUB_TOKEN_REPO_CREATE }}" ]]; then
+            echo "repo_creation=skip" >> "$GITHUB_OUTPUT"
+            echo "⚠️  PREREQUISITE MISSING: Secret GITHUB_TOKEN_REPO_CREATE not configured."
+            echo "   To enable automatic repository creation, add a GitHub Personal Access Token"
+            echo "   with 'repo' scope as secret GITHUB_TOKEN_REPO_CREATE in this repository."
+            echo "   Continuing without creating a new GitHub repository."
+          else
+            echo "repo_creation=proceed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub repository (if token available)
+        if: steps.check_token.outputs.repo_creation == 'proceed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN_REPO_CREATE }}
+        run: |
+          gh repo create "ronak0903/${{ inputs.service_name }}" \
+            --public \
+            --description "${{ inputs.description }}" \
+            --clone || echo "Repository may already exist, continuing..."
+          echo "✅ Repository created: https://github.com/ronak0903/${{ inputs.service_name }}"
+
+      - name: Update Port service entity
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_name }}
+          title: ${{ inputs.service_name }}
+          blueprint: service
+          team: ${{ inputs.team }}
+          properties: |
+            {
+              "tier": "backend",
+              "slack_channel": "#${{ inputs.service_name }}"
+            }
+          relations: |
+            {
+              "environments": ["${{ inputs.environment }}"]
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Service '${{ inputs.service_name }}' scaffolded successfully!
+            Language: ${{ inputs.language }}
+            Owner: ${{ inputs.team }}
+            NOTE: To enable automatic GitHub repo creation, add secret GITHUB_TOKEN_REPO_CREATE with repo scope.
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: "❌ Scaffolding failed for '${{ inputs.service_name }}'. Check workflow logs."
