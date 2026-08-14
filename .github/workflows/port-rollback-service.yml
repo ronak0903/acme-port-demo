@@ -1,0 +1,202 @@
+name: Port - Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_identifier:
+        description: "Port deployment entity identifier being rolled back"
+        required: true
+        type: string
+      deployment_title:
+        description: "Deployment display title"
+        required: true
+        type: string
+      reason:
+        description: "Reason for rollback"
+        required: true
+        type: string
+      triggered_by:
+        description: "Email of the user triggering the rollback"
+        required: false
+        type: string
+      port_run_id:
+        description: "Port action run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Display rollback context
+        run: |
+          echo "============================================"
+          echo "  ACME DEVELOPER PLATFORM — Rollback"
+          echo "============================================"
+          echo "Deployment:   ${{ inputs.deployment_identifier }}"
+          echo "Title:        ${{ inputs.deployment_title }}"
+          echo "Reason:       ${{ inputs.reason }}"
+          echo "Triggered by: ${{ inputs.triggered_by }}"
+          echo "============================================"
+
+      - name: Report rollback initiated
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "⏪ Rollback initiated for '${{ inputs.deployment_title }}'. Reason: ${{ inputs.reason }}"
+
+      - name: Fetch deployment info from Port
+        id: deployment_info
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+        run: |
+          echo "🔍 Fetching deployment details from Port catalog..."
+
+          # Authenticate with Port
+          TOKEN=$(curl -s -X POST https://api.getport.io/v1/auth/access_token \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$PORT_CLIENT_ID\",\"clientSecret\":\"$PORT_CLIENT_SECRET\"}" \
+            | jq -r '.accessToken')
+
+          if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
+            echo "❌ ERROR: Could not authenticate with Port. Check PORT_CLIENT_ID and PORT_CLIENT_SECRET secrets."
+            exit 1
+          fi
+
+          # Fetch current deployment entity
+          DEPLOYMENT=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            "https://api.getport.io/v1/blueprints/deployment/entities/${{ inputs.deployment_identifier }}")
+
+          CURRENT_VERSION=$(echo "$DEPLOYMENT" | jq -r '.entity.properties.version // "unknown"')
+          SERVICE_ID=$(echo "$DEPLOYMENT" | jq -r '.entity.relations.service // "unknown"')
+          ENV_ID=$(echo "$DEPLOYMENT" | jq -r '.entity.relations.environment_relation // "unknown"')
+
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "service_id=$SERVICE_ID" >> "$GITHUB_OUTPUT"
+          echo "env_id=$ENV_ID" >> "$GITHUB_OUTPUT"
+
+          echo "  Current deployment version: $CURRENT_VERSION"
+          echo "  Service:                    $SERVICE_ID"
+          echo "  Environment:                $ENV_ID"
+
+          # Fetch prior deployments for this service to find previous version
+          echo ""
+          echo "🔍 Searching for previous successful deployment..."
+          PRIOR=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST "https://api.getport.io/v1/blueprints/deployment/entities/search" \
+            -d "{
+              \"combinator\": \"and\",
+              \"rules\": [
+                {\"property\": \"deploymentStatus\", \"operator\": \"=\", \"value\": \"Success\"},
+                {\"relation\": \"service\", \"operator\": \"=\", \"value\": \"$SERVICE_ID\"}
+              ]
+            }")
+
+          PREV_VERSION=$(echo "$PRIOR" | jq -r \
+            '[.entities[] | select(.identifier != "${{ inputs.deployment_identifier }}")]
+             | sort_by(.properties.createdAt) | reverse | .[0].properties.version // null' 2>/dev/null)
+
+          if [[ -z "$PREV_VERSION" || "$PREV_VERSION" == "null" ]]; then
+            echo "prev_version=NOT_FOUND" >> "$GITHUB_OUTPUT"
+            echo "  ⚠️  No previous successful deployment found for service $SERVICE_ID"
+          else
+            echo "prev_version=$PREV_VERSION" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Previous version found: $PREV_VERSION"
+          fi
+
+      - name: Abort if no previous version
+        if: steps.deployment_info.outputs.prev_version == 'NOT_FOUND'
+        run: |
+          echo "❌ Cannot rollback: no previous successful deployment found for this service."
+          echo "   This appears to be the first deployment. There is nothing to roll back to."
+          exit 1
+
+      - name: Report rollback target identified
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: |
+            ⏪ Rolling back:
+              From: v${{ steps.deployment_info.outputs.current_version }}
+              To:   v${{ steps.deployment_info.outputs.prev_version }}
+              Env:  ${{ steps.deployment_info.outputs.env_id }}
+
+      - name: Simulate — Execute rollback
+        run: |
+          PREV="${{ steps.deployment_info.outputs.prev_version }}"
+          CURR="${{ steps.deployment_info.outputs.current_version }}"
+          ENV="${{ steps.deployment_info.outputs.env_id }}"
+          SERVICE="${{ steps.deployment_info.outputs.service_id }}"
+          echo "[SIMULATE] Rolling back $SERVICE in $ENV..."
+          echo "  ▸ Current version: $CURR"
+          echo "  ▸ Target version:  $PREV"
+          sleep 1
+          echo "  ▸ Pulling image for v$PREV..."
+          sleep 2
+          echo "  ▸ Stopping current containers (v$CURR)..."
+          sleep 1
+          echo "  ▸ Starting containers with v$PREV..."
+          sleep 2
+          echo "  ▸ Running health checks..."
+          sleep 1
+          echo "✅ Rollback complete — service is running v$PREV"
+
+      - name: Update deployment status in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.deployment_identifier }}
+          blueprint: deployment
+          properties: |
+            {
+              "deploymentStatus": "Failure"
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Rollback complete!
+            From version: v${{ steps.deployment_info.outputs.current_version }}
+            To version:   v${{ steps.deployment_info.outputs.prev_version }}
+            Environment:  ${{ steps.deployment_info.outputs.env_id }}
+            Rolled back by: ${{ inputs.triggered_by }}
+            Reason: ${{ inputs.reason }}
+            NOTE: The rolled-back deployment has been marked as Failure in Port.
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: "❌ Rollback FAILED for '${{ inputs.deployment_title }}'. Check workflow logs immediately."
