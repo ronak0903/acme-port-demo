@@ -1,0 +1,109 @@
+name: Port - Scale Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_identifier:
+        description: "Port service entity identifier"
+        required: true
+        type: string
+      service_name:
+        description: "Service display name"
+        required: true
+        type: string
+      environment:
+        description: "Target environment identifier"
+        required: true
+        type: string
+      replica_count:
+        description: "Desired number of replicas (1-20)"
+        required: true
+        type: string
+      triggered_by:
+        description: "Email of the user who triggered this scale"
+        required: false
+        type: string
+      port_run_id:
+        description: "Port action run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  scale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        run: |
+          echo "============================================"
+          echo "  ACME DEVELOPER PLATFORM — Scale Service"
+          echo "============================================"
+          echo "Service:      ${{ inputs.service_identifier }}"
+          echo "Environment:  ${{ inputs.environment }}"
+          echo "Replicas:     ${{ inputs.replica_count }}"
+          echo "Triggered by: ${{ inputs.triggered_by }}"
+          echo "============================================"
+          REPLICAS="${{ inputs.replica_count }}"
+          if [[ "$REPLICAS" -lt 1 || "$REPLICAS" -gt 20 ]]; then
+            echo "❌ ERROR: replica_count must be between 1 and 20 (got $REPLICAS)"
+            exit 1
+          fi
+          echo "✅ Inputs validated"
+
+      - name: Report scale started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "⚖️  Scaling ${{ inputs.service_name }} to ${{ inputs.replica_count }} replica(s) in ${{ inputs.environment }}..."
+
+      - name: Simulate — Apply scale
+        run: |
+          echo "[SIMULATE] Scaling ${{ inputs.service_identifier }} to ${{ inputs.replica_count }} replicas in ${{ inputs.environment }}..."
+          REPLICAS=${{ inputs.replica_count }}
+          for i in $(seq 1 $REPLICAS); do
+            echo "  ▸ Replica $i/$REPLICAS starting..."
+            sleep 1
+            echo "  ✅ Replica $i ready"
+          done
+
+      - name: Simulate — Verify scale
+        run: |
+          echo "[SIMULATE] Verifying all replicas are healthy..."
+          REPLICAS=${{ inputs.replica_count }}
+          for i in $(seq 1 $REPLICAS); do
+            echo "  Health check replica $i: 200 OK"
+            sleep 0.5
+          done
+          echo "✅ All $REPLICAS replica(s) healthy and serving traffic"
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Scaling complete!
+            Service:     ${{ inputs.service_name }}
+            Environment: ${{ inputs.environment }}
+            Replicas:    ${{ inputs.replica_count }}
+            Scaled by:   ${{ inputs.triggered_by }}
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: "❌ Scaling FAILED for ${{ inputs.service_name }} in ${{ inputs.environment }}. Check workflow logs."
